@@ -10,6 +10,9 @@ import { type FoodAnalysisResult } from "@/app/components/ResultsScreen";
  */
 
 const LLAMA_API_URL = process.env.LLAMA_API_URL || "http://localhost:8080";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+
+const useGeminiAI = true;
 
 /**
  * System prompt in English with full 50-ingredient allergen database.
