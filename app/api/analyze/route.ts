@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { type FoodAnalysisResult } from "@/app/components/ResultsScreen";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 /**
  * AI Menu Allergen Analysis Endpoint
@@ -12,7 +13,7 @@ import { type FoodAnalysisResult } from "@/app/components/ResultsScreen";
 const LLAMA_API_URL = process.env.LLAMA_API_URL || "http://localhost:8080";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
-const useGeminiAI = true;
+const useGeminiAI = process.env.USE_GEMINI_AI === "true";
 
 /**
  * System prompt in English with full 50-ingredient allergen database.
@@ -176,54 +177,87 @@ Analyze this restaurant menu photo. For each menu item:
 
 Respond ONLY with a JSON array. All text values must be in Bahasa Indonesia.`;
 
-    // Call llama.cpp API with image
-    const llamaResponse = await fetch(`${LLAMA_API_URL}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messages: [
-          {
-            role: "system",
-            content: SYSTEM_PROMPT,
+    // Extract the response content
+    let responseContent = "";
+
+    if (useGeminiAI) {
+      if (!GEMINI_API_KEY) {
+        return NextResponse.json(
+          { error: "GEMINI_API_KEY tidak dikonfigurasi" },
+          { status: 500 },
+        );
+      }
+
+      const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.5-flash",
+        generationConfig: {
+          responseMimeType: "application/json",
+        },
+      });
+
+      const result = await model.generateContent([
+        {
+          inlineData: {
+            data: base64Data,
+            mimeType: "image/jpeg",
           },
-          {
-            role: "user",
-            content: [
+        },
+        SYSTEM_PROMPT + "\n\n" + userPrompt,
+      ]);
+
+      responseContent = result.response.text();
+    } else {
+      // Call llama.cpp API with image
+      const llamaResponse = await fetch(
+        `${LLAMA_API_URL}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            messages: [
               {
-                type: "text",
-                text: userPrompt,
+                role: "system",
+                content: SYSTEM_PROMPT,
               },
               {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${base64Data}`,
-                },
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text: userPrompt,
+                  },
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/jpeg;base64,${base64Data}`,
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        temperature: 0.3,
-        max_tokens: 4096,
-        stream: false,
-      }),
-    });
-
-    if (!llamaResponse.ok) {
-      const errorText = await llamaResponse.text();
-      console.error("LLM API error:", llamaResponse.status, errorText);
-      return NextResponse.json(
-        { error: `Layanan AI error: ${llamaResponse.status}` },
-        { status: 502 },
+            temperature: 0.3,
+            max_tokens: 4096,
+            stream: false,
+          }),
+        },
       );
+
+      if (!llamaResponse.ok) {
+        const errorText = await llamaResponse.text();
+        console.error("LLM API error:", llamaResponse.status, errorText);
+        return NextResponse.json(
+          { error: `Layanan AI error: ${llamaResponse.status}` },
+          { status: 502 },
+        );
+      }
+
+      const llamaData = await llamaResponse.json();
+      responseContent =
+        llamaData.choices?.[0]?.message?.content || llamaData.content || "";
     }
-
-    const llamaData = await llamaResponse.json();
-
-    // Extract the response content
-    const responseContent =
-      llamaData.choices?.[0]?.message?.content || llamaData.content || "";
 
     // Parse JSON from LLM response (handle possible markdown wrapping)
     let results: FoodAnalysisResult[] = [];
@@ -238,11 +272,15 @@ Respond ONLY with a JSON array. All text values must be in Bahasa Indonesia.`;
           .replace(/\n?```\s*$/, "");
       }
 
-      // Find the JSON array in the response
-      const jsonMatch = jsonStr.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch);
+      // Find the JSON array in the response if not already clean
+      if (!jsonStr.startsWith("[") && jsonStr.includes("[")) {
+        const jsonMatch = jsonStr.match(/\[[\s\S]*\]/);
+        if (jsonMatch) jsonStr = jsonMatch[0];
+      }
 
+      const parsed = JSON.parse(jsonStr);
+
+      if (Array.isArray(parsed)) {
         // Validate and sanitize each result
         results = parsed.map((item: Record<string, unknown>) => ({
           name: String(item.name || "Menu Tidak Diketahui"),
